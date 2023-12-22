@@ -1,5 +1,6 @@
 #!/bin/false "This script should be sourced in a shell, not executed directly"
 # vim: syntax=bash:ts=2:sw=2:sts=2:et
+# Derived from: https://github.com/paolopasqua/synology-certbot
 if [ "${BASH_SOURCE[0]}" -ef "$0" ]; then
   exit 1
 fi
@@ -234,6 +235,9 @@ copy_certificate() {
 
   #check if exist and delete
   if [ $(ls $cert_dir 2>/dev/null | grep -c -e ".pem") -gt 0 ]; then
+    if [ ! -d "$cert_dir.bak" ]; then
+      cmd mkdir "$cert_dir.bak"
+    fi
     cmd cp -r $cert_dir/*.pem "$cert_dir.bak"
   fi
 
@@ -408,6 +412,7 @@ cert_check() {
   if [ -e "$cert_file" ]; then
     info "Checking expiration date for $clear_domain..."
     local exp=$(date -d "`openssl x509 -in $cert_file -text -noout|grep "Not After"|cut -c 25-`" +%s)
+    info "Expiration date for ${clear_domain}: $(date --iso-8601=seconds --date=@$exp)"
     local datenow=$(date -d "now" +%s)
     local days_exp=$[ ( $exp - $datenow ) / 86400 ]
   else
@@ -427,12 +432,14 @@ cert_check() {
       info "The certificate for $clear_domain expires in $days_exp days. Starting renewal script..."
       renew_cert
     else
-      info "There's no certificate for $clear_domain. Starting generate script..."
+      info "There's no certificate for $clear_domain (or it has already expired). Starting generate script..."
+      # uses --renew-by-default, so if the cert exists but is expired, then
+      # it will be renewed; otherwise a new cert will be created.
       gen_cert
     fi
     info "Process finished for domain $clear_domain"
   fi
 }
 
-info "--- start. $(date)"
+info "--- start. $(date --iso-8601=seconds)"
 cert_check
