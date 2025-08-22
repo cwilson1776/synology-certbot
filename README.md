@@ -14,12 +14,18 @@ renew, and deploy as synology's default certificate.
 
 Options:
   -h         Show this help
-  -n         Dry-run; do not actually create/renew the certificate.
-             Implies -s, but does communicate with LE and Cloudflare.
+  -n         Dry-run; uses the LE staging server and communicates with
+             Cloudflare, but does not save the result at all. Rather, it
+             simply verifies the configuration works as expected.
+             Implies -s.
+  -S         staging; uses the LE staging server and communicates with
+             Cloudflare and saves the result into /etc/live/{domain}/.
+             The certificate is not a trusted one, but this process is
+             not subject to rate limits. Implies -s.
   -e         Echo only. This simply prints the commands that would
              be executed, and takes no other action.
   -m MODE    MODE is 'auto', 'create', 'renew', or 'deploy' (default: auto)
-             create: if cert already exists, will forcibly renew even
+     create: if cert already exists, will forcibly renew even
                      if not nearing expiration. Deploys to syno (unless -s)
              renew:  Will renew if nearing expiration; if updated, deploys
                      to syno (unless -s)

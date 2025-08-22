@@ -55,12 +55,18 @@ cat <<- EOF
 
 	Options:
 	  -h         Show this help
-	  -n         Dry-run; do not actually create/renew the certificate.
-	             Implies -s, but does communicate with LE and Cloudflare.
+	  -n         Dry-run; uses the LE staging server and communicates with
+	             Cloudflare, but does not save the result at all. Rather, it
+	             simply verifies the configuration works as expected.
+	             Implies -s.
+	  -S         staging; uses the LE staging server and communicates with
+	             Cloudflare and saves the result into /etc/live/{domain}/.
+	             The certificate is not a trusted one, but this process is
+	             not subject to rate limits. Implies -s.
 	  -e         Echo only. This simply prints the commands that would
 	             be executed, and takes no other action.
 	  -m MODE    MODE is 'auto', 'create', 'renew', or 'deploy' (default: auto)
-	             create: if cert already exists, will forcibly renew even
+		     create: if cert already exists, will forcibly renew even
 	                     if not nearing expiration. Deploys to syno (unless -s)
 	             renew:  Will renew if nearing expiration; if updated, deploys
 	                     to syno (unless -s)
@@ -106,13 +112,16 @@ info() {
   echo "${scriptName} INFO: $@" >&2
 }
 
+
+__status_force_renew=
 opt_dryrun=
 opt_mode=auto
 opt_deploy=1
 opt_echo_only=
 opt_deploy_only=
 opt_verbose=
-while getopts ":hnevm:s" o; do
+opt_staging=
+while getopts ":hnevm:sS" o; do
   case "${o}" in
   h) usage 0 ;;
   n) opt_dryrun=1 ;;
@@ -120,6 +129,7 @@ while getopts ":hnevm:s" o; do
   v) opt_verbose=1 ;;
   m) opt_mode=$OPTARG ;;
   s) opt_deploy=0 ;;
+  S) opt_staging=1 ;;
   :) error "Must supply an argument to -$OPTARG."
      usage 2 >&2 ;;
   ?) error "Invalid option: -${OPTARG}."
@@ -163,8 +173,9 @@ if [ -z "$DOMAIN" ]; then
   exit 1
 fi
 
-# only matters when not dry-run; otherwise we use --register-unsafely-without-email
-if [ -z "$EMAIL_ADDRESS" -a -z "${opt_dryrun}" ]; then
+# only matters when neither dry-run nor staging; otherwise we use
+# --register-unsafely-without-email
+if [ -z "$EMAIL_ADDRESS" -a -z "${opt_dryrun}${opt_staging}" ]; then
   error "No email set, please fill -e 'EMAIL_ADDRESS=your@email.tld'"
   exit 1
 fi
@@ -218,7 +229,7 @@ gen_cert_dir="$CERTBOT_DIR_PATH/live/$clear_domain";
 
 reload_synoservices() {
   info "Reloading service configurations"
-  cmd /usr/syno/bin/synosystemctl reload nginx;
+  cmd /usr/syno/bin/synosystemctl restart nginx;
 }
 
 # Requires $cert_dir
@@ -249,12 +260,18 @@ copy_certificate() {
 
 # If opt_deploy, then requires $cert_dir, $clear_domain, $gen_cert_dir
 gen_cert() {
-  if [ ${CHALLENGE_TYPE} = "HTTP" ]; then
-    do_cert_http --renew-by-default
-  else
-    do_cert_cloudflare --renew-by-default
+  local force_renew=
+  if [ -n "${__status_force_renew}" ]; then
+    # Note: add --break-my-certs if using staging, but current cert is real
+    #       add --cert-name ${SYNO_DESCRIPTION} if changing key-type
+    force_renew="--force-renewal"
   fi
-  if [ "${opt_deploy}" -gt 0 -a -z "${opt_dryrun}" ]; then
+  if [ ${CHALLENGE_TYPE} = "HTTP" ]; then
+    do_cert_http --renew-by-default ${force_renew}
+  else
+    do_cert_cloudflare --renew-by-default ${force_renew}
+  fi
+  if [ "${opt_deploy}" -gt 0 -a -z "${opt_dryrun}${opt_staging}" ]; then
     copy_certificate
     fix_permissions
     reload_synoservices
@@ -268,7 +285,7 @@ renew_cert() {
   else
     do_cert_cloudflare --keep-until-expiring
   fi
-  if [ "${opt_deploy}" -gt 0 -a -z "${opt_dryrun}" ]; then
+  if [ "${opt_deploy}" -gt 0 -a -z "${opt_dryrun}${opt_staging}" ]; then
     copy_certificate
     fix_permissions
     reload_synoservices
@@ -276,10 +293,12 @@ renew_cert() {
 }
 
 do_cert_http() {
-  local renew=$1
+  # args expected...pass on to certbot
   local cmdvar="--email ${EMAIL_ADDRESS} --no-eff-email "
   if [ -n "${opt_dryrun}" ]; then
     cmdvar="--dry-run --register-unsafely-without-email"
+  elif [ -n "${opt_staging}" ]; then
+    cmdvar="--staging --register-unsafely-without-email"
   fi
   cmd docker run --rm --name temp_certbot \
     -v "${CERTBOT_DIR_PATH}:/etc/letsencrypt" \
@@ -290,9 +309,9 @@ do_cert_http() {
     certonly \
     --non-interactive \
     --agree-tos --text \
-    ${renew} \
+    "${@}" \
     --server https://acme-v02.api.letsencrypt.org/directory \
-    --key-type ecdsa \
+    --key-type rsa \
     ${cmdvar} \
     --webroot \
     --preferred-challenges http-01 \
@@ -301,9 +320,12 @@ do_cert_http() {
 }
 
 do_cert_cloudflare() {
+  # args expected...pass on to certbot
   local cmdvar="--email ${EMAIL_ADDRESS} --no-eff-email "
   if [ -n "${opt_dryrun}" ]; then
     cmdvar="--dry-run --register-unsafely-without-email"
+  elif [ -n "${opt_staging}" ]; then
+    cmdvar="--staging --register-unsafely-without-email"
   fi
 
   cmd docker run --rm --name temp_certbot \
@@ -315,9 +337,9 @@ do_cert_cloudflare() {
     certonly \
     --non-interactive \
     --agree-tos --text \
-    ${renew} \
+    "${@}" \
     --server https://acme-v02.api.letsencrypt.org/directory \
-    --key-type ecdsa \
+    --key-type rsa \
     ${cmdvar} \
     --dns-cloudflare \
     --dns-cloudflare-credentials /.secrets/cloudflare.ini \
@@ -425,6 +447,7 @@ cert_check() {
     info "The certificate is up to date, no need for renewal ($days_exp days left)."
     if [ "${opt_mode}" == "create" ]; then
       info "But mode is 'create' so we will forcibly renew"
+      __status_force_renew=1
       gen_cert
     fi
   else
